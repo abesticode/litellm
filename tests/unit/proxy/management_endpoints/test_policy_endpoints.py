@@ -4,6 +4,7 @@ Unit tests for policy management endpoints.
 Tests apply_policies: resolving guardrails from policy names and applying them to inputs.
 """
 
+from typing import Final
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -642,6 +643,44 @@ class TestApplyPoliciesDirectGuardrailNames:
         # Sorted order: direct_guardrail then from_policy; final output is from_policy
         assert result["inputs"] == first_output
         assert result["guardrail_errors"] == []
+
+
+class _VerdictCountingGuardrail(CustomGuardrail):
+    async def apply_guardrail(
+        self,
+        inputs: GenericGuardrailAPIInputs,
+        request_data: dict,
+        input_type: str,
+        logging_obj=None,
+    ) -> GenericGuardrailAPIInputs:
+        earlier_verdicts: Final = request_data.get("metadata", {}).get("standard_logging_guardrail_information", [])
+        self.verdicts_seen = (*getattr(self, "verdicts_seen", ()), len(earlier_verdicts))
+        return inputs
+
+
+@pytest.mark.asyncio
+async def test_each_batch_input_is_checked_without_verdicts_from_earlier_inputs() -> None:
+    from litellm.proxy._types import LitellmUserRoles, UserAPIKeyAuth
+    from litellm.proxy.management_endpoints.policy_endpoints import endpoints
+
+    guardrail: Final = _VerdictCountingGuardrail(guardrail_name="counting")
+    guardrail_registry: Final = MagicMock()
+    guardrail_registry.get_initialized_guardrail_callback.return_value = guardrail
+
+    with patch(
+        "litellm.proxy.management_endpoints.policy_endpoints.endpoints.GuardrailRegistry",
+        return_value=guardrail_registry,
+    ):
+        await endpoints.test_policies_and_guardrails(
+            request=MagicMock(),
+            data=endpoints.TestPoliciesAndGuardrailsRequest(
+                guardrail_names=["counting"],
+                inputs_list=[{"texts": ["first input"]}, {"texts": ["second input"]}],
+            ),
+            user_api_key_dict=UserAPIKeyAuth(user_role=LitellmUserRoles.PROXY_ADMIN),
+        )
+
+    assert guardrail.verdicts_seen == (0, 0)
 
 
 # ---------------------------------------------------------------------------
